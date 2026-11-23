@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f4fb">
+  <title>Security check · Curium DNS</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg:#f7f4fb; --surface:#fffbff; --surface2:#f0ebf6; --ink:#1d1a22;
+      --muted:#625d6a; --line:#e2dce8; --primary:#6250a5; --primary-container:#e9ddff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { color-scheme:dark; --bg:#14121a; --surface:#1d1a23; --surface2:#27232e; --ink:#e9e1ee; --muted:#c9bfce; --line:#393340; --primary:#cbb9ff; --primary-container:#4b3677; }
+    }
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(800px 380px at 85% -10%,rgba(206,190,255,.25),transparent 65%),var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .card{width:min(100%,480px);padding:36px;border:1px solid var(--line);border-radius:30px;background:var(--surface);box-shadow:0 18px 56px rgba(40,30,60,.09);text-align:center}
+    .brand{display:flex;justify-content:center;align-items:center;gap:10px;font-size:17px;font-weight:760;letter-spacing:-.04em}
+    .mark{width:36px;height:36px;display:grid;place-items:center;border-radius:13px;background:var(--primary-container);color:var(--primary)}
+    .mark svg{width:20px;height:20px}
+    .eyebrow{display:inline-flex;align-items:center;gap:8px;margin-top:30px;padding:7px 12px;border-radius:99px;background:var(--surface2);color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}
+    .dot{width:7px;height:7px;border-radius:50%;background:#399565}
+    h1{margin:20px 0 10px;font-size:30px;line-height:1.1;letter-spacing:-.055em}
+    p{margin:0 auto;color:var(--muted);font-size:14px;line-height:1.7;max-width:365px}
+    .widget-wrap{display:flex;justify-content:center;min-height:66px;margin:28px auto 12px}
+    #message{min-height:22px;margin-top:12px;font-size:12px;color:var(--muted)}
+    .footer{margin-top:24px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
+    .footer a{color:var(--primary);text-decoration:none}
+    @media(max-width:480px){.card{padding:28px 20px;border-radius:24px}h1{font-size:27px}}
+  </style>
+  <script>
+    window.onTurnstileLoad = async function () {
+      const message = document.getElementById("message");
+      try {
+        const response = await fetch("/api/config", {cache:"no-store"});
+        const config = await response.json();
+        if (!response.ok || !config.turnstile_enabled || !config.site_key) {
+          message.textContent = "Security verification is not configured. Please contact the site administrator.";
+          return;
+        }
+        window.turnstile.render("#turnstile-widget", {
+          sitekey: config.site_key,
+          theme: "auto",
+          size: "flexible",
+          callback: async function (token) {
+            message.textContent = "Verification complete. Opening Curium DNS…";
+            try {
+              const result = await fetch("/api/turnstile/verify", {
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                credentials:"same-origin",
+                body:JSON.stringify({token})
+              });
+              if (!result.ok) throw new Error("Verification could not be confirmed.");
+              window.location.replace("/");
+            } catch (error) {
+              message.textContent = error.message || "Please try the security check again.";
+              if (window.turnstile) window.turnstile.reset();
+            }
+          },
+          "error-callback": function () { message.textContent = "The security check could not load. Please refresh and try again."; },
+          "expired-callback": function () { message.textContent = "The security check expired. Please verify again."; }
+        });
+      } catch {
+        message.textContent = "Unable to load security settings. Please refresh and try again.";
+      }
+    };
+  </script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoad&render=explicit" async defer></script>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M19.2 7.2a8.2 8.2 0 1 0 0 9.6M19.2 7.2V3.8m0 3.4h-3.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span>curium<span style="color:var(--primary)">.</span>dns</span>
+    </div>
+    <div class="eyebrow"><span class="dot"></span> Security check</div>
+    <h1>Verify you’re human</h1>
+    <p>Complete the security check below to continue to Curium DNS. This helps protect the website from automated abuse.</p>
+    <div class="widget-wrap"><div id="turnstile-widget"></div></div>
+    <div id="message" role="status" aria-live="polite">Loading secure verification…</div>
+    <div class="footer">Protected by <a href="https://www.cloudflare.com/application-services/products/turnstile/" target="_blank" rel="noopener noreferrer">Cloudflare Turnstile</a></div>
+  </main>
+</body>
+</html>
