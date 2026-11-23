@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f4fb">
+  <title>Security setup · Curium DNS</title>
+  <style>
+    :root{color-scheme:light;--bg:#f7f4fb;--surface:#fffbff;--surface2:#f0ebf6;--ink:#1d1a22;--muted:#625d6a;--line:#e2dce8;--primary:#6250a5;--pc:#e9ddff}
+    @media(prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#14121a;--surface:#1d1a23;--surface2:#27232e;--ink:#e9e1ee;--muted:#c9bfce;--line:#393340;--primary:#cbb9ff;--pc:#4b3677}}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,sans-serif}
+    main{width:min(100%,560px);padding:36px;border:1px solid var(--line);border-radius:28px;background:var(--surface);box-shadow:0 16px 50px rgba(40,30,60,.08)}
+    .icon{width:48px;height:48px;border-radius:17px;background:var(--pc);color:var(--primary);display:grid;place-items:center;font-size:22px}
+    h1{margin:20px 0 10px;font-size:30px;letter-spacing:-.05em}p,li{color:var(--muted);font-size:14px;line-height:1.7}
+    ol{padding-left:22px}.tag{font-family:ui-monospace,monospace;font-size:12px;color:var(--ink);background:var(--surface2);padding:3px 7px;border-radius:6px}
+    a{color:var(--primary);font-weight:650}small{display:block;border-top:1px solid var(--line);margin-top:24px;padding-top:18px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="icon" aria-hidden="true">✓</div>
+    <h1>One last setup step</h1>
+    <p>Curium DNS is running. Cloudflare Turnstile protection is prepared in the app, but the widget keys have not been added to the Render environment yet.</p>
+    <ol>
+      <li>Open the <a href="https://dash.cloudflare.com/?to=/:account/turnstile" target="_blank" rel="noopener noreferrer">Cloudflare Turnstile dashboard</a> and create a widget.</li>
+      <li>Add <span class="tag">curium-dns-app.onrender.com</span> to the widget’s allowed hostnames.</li>
+      <li>In Render → Curium-DNS-App → Environment, add <span class="tag">TURNSTILE_SITE_KEY</span> and <span class="tag">TURNSTILE_SECRET_KEY</span>.</li>
+      <li>Save changes. Render will redeploy, and the Turnstile check will appear automatically.</li>
+    </ol>
+    <p>The secret key must only be stored in Render environment variables. Do not put it in GitHub or in the page source.</p>
+    <small>The DNS-over-HTTPS endpoint remains separate so standard DNS clients can use it without an interactive browser challenge.</small>
+  </main>
+</body>
+</html>
