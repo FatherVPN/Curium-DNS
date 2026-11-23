@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import os
 import time
+import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +19,16 @@ from fastapi.responses import FileResponse, JSONResponse
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 UPSTREAM_DOH = os.getenv("UPSTREAM_DOH", "https://cloudflare-dns.com/dns-query")
+TURNSTILE_SITE_KEY = os.getenv("TURNSTILE_SITE_KEY", "").strip()
+TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
+TURNSTILE_ALLOWED_HOSTS = {
+    host.strip().lower()
+    for host in os.getenv("TURNSTILE_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+}
+ACCESS_GATE_SECRET = os.getenv("ACCESS_GATE_SECRET", "")
+ACCESS_COOKIE_NAME = "curium_verified"
+ACCESS_COOKIE_MAX_AGE = 12 * 60 * 60
 MAX_DNS_MESSAGE_SIZE = 4096
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MINUTE", "90"))
 WINDOW_SECONDS = 60
@@ -39,7 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Curium DNS",
     description="A small DNS-over-HTTPS forwarding gateway.",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -59,11 +72,19 @@ async def security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; "
+        "frame-src https://challenges.cloudflare.com; "
+        "connect-src 'self' https://challenges.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    )
     return response
 
 
 def client_key(request: Request) -> str:
-    # Render's proxy supplies X-Forwarded-For. Only the first address is used.
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
         return forwarded.split(",")[0].strip()[:64]
@@ -87,7 +108,6 @@ def enforce_rate_limit(request: Request) -> None:
 
     window.append(now)
 
-    # Keep the in-memory map bounded on long-lived instances.
     if len(_request_windows) > 5000:
         stale_before = now - WINDOW_SECONDS
         stale_keys = [
@@ -98,6 +118,41 @@ def enforce_rate_limit(request: Request) -> None:
             _request_windows.pop(ip, None)
 
 
+def turnstile_is_configured() -> bool:
+    return bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY and ACCESS_GATE_SECRET)
+
+
+def make_access_cookie() -> str:
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        ACCESS_GATE_SECRET.encode("utf-8"),
+        timestamp.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{timestamp}.{signature}"
+
+
+def has_valid_access_cookie(value: str | None) -> bool:
+    if not value or not ACCESS_GATE_SECRET:
+        return False
+    try:
+        timestamp, supplied_signature = value.split(".", 1)
+        issued_at = int(timestamp)
+    except (ValueError, TypeError):
+        return False
+
+    age = int(time.time()) - issued_at
+    if age < 0 or age > ACCESS_COOKIE_MAX_AGE:
+        return False
+
+    expected_signature = hmac.new(
+        ACCESS_GATE_SECRET.encode("utf-8"),
+        timestamp.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(supplied_signature, expected_signature)
+
+
 def validate_dns_query(packet: bytes) -> None:
     if len(packet) < 12 or len(packet) > MAX_DNS_MESSAGE_SIZE:
         raise HTTPException(status_code=400, detail="Invalid DNS message size.")
@@ -106,8 +161,6 @@ def validate_dns_query(packet: bytes) -> None:
     opcode = (flags >> 3) & 0x0F
     question_count = int.from_bytes(packet[4:6], "big")
 
-    # This endpoint forwards standard DNS queries only, not responses or
-    # non-query opcodes. One question keeps the public endpoint predictable.
     if flags & 0x80:
         raise HTTPException(status_code=400, detail="A DNS query was expected.")
     if opcode != 0 or question_count != 1:
@@ -149,13 +202,79 @@ async def forward_dns(request: Request, packet: bytes) -> Response:
 
 
 @app.get("/")
-async def home():
+async def home(request: Request):
+    no_cache = {"Cache-Control": "no-store"}
+    if not turnstile_is_configured():
+        return FileResponse(STATIC_DIR / "security-setup.html", headers=no_cache)
+    if not has_valid_access_cookie(request.cookies.get(ACCESS_COOKIE_NAME)):
+        return FileResponse(STATIC_DIR / "challenge.html", headers=no_cache)
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok", "service": "curium-dns"}
+
+
+@app.get("/api/config")
+async def api_config():
+    return {
+        "turnstile_enabled": turnstile_is_configured(),
+        "site_key": TURNSTILE_SITE_KEY if turnstile_is_configured() else None,
+    }
+
+
+@app.post("/api/turnstile/verify")
+async def verify_turnstile(request: Request):
+    enforce_rate_limit(request)
+
+    if not turnstile_is_configured():
+        raise HTTPException(status_code=503, detail="Turnstile is not configured.")
+
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="A JSON body is required.")
+
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token or len(token) > 2048:
+        raise HTTPException(status_code=400, detail="A valid Turnstile token is required.")
+
+    try:
+        siteverify = await request.app.state.http.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            json={
+                "secret": TURNSTILE_SECRET_KEY,
+                "response": token,
+                "idempotency_key": str(uuid.uuid4()),
+            },
+        )
+        siteverify.raise_for_status()
+        result = siteverify.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=502, detail="Could not validate the security check.")
+
+    if not result.get("success"):
+        raise HTTPException(status_code=403, detail="Security check failed. Please try again.")
+
+    verified_hostname = str(result.get("hostname", "")).lower()
+    request_hostname = (request.url.hostname or "").lower()
+    allowed_hosts = TURNSTILE_ALLOWED_HOSTS or {request_hostname}
+    if not verified_hostname or verified_hostname not in allowed_hosts:
+        raise HTTPException(status_code=403, detail="Security check hostname did not match.")
+
+    response = JSONResponse({"verified": True})
+    response.set_cookie(
+        key=ACCESS_COOKIE_NAME,
+        value=make_access_cookie(),
+        max_age=ACCESS_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/status")
